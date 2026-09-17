@@ -108,10 +108,16 @@ class TestFp8FnuzWeightReload(unittest.TestCase):
                     for name, p in layer.named_parameters()
                 }
                 method.process_weights_after_loading_block_quant(layer)
+                if moe and shuffled:
+                    self.assertTrue(layer.w13_weight.is_shuffled)
+                    self.assertTrue(layer.w2_weight.is_shuffled)
                 for seed in (1, 5, 9):
                     fresh_method, fresh, incoming = self._make(moe, shuffled, seed)
                     fresh_method.process_weights_after_loading_block_quant(fresh)
                     method.restore_weights_before_loading(layer)
+                    if moe and shuffled:
+                        self.assertFalse(layer.w13_weight.is_shuffled)
+                        self.assertFalse(layer.w2_weight.is_shuffled)
                     method.restore_weights_before_loading(layer)  # idempotent begin
                     for name, param in layer.named_parameters():
                         param.weight_loader(param, incoming[name])
