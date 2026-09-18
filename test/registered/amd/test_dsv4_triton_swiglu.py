@@ -18,7 +18,6 @@ class TestDsv4TritonSwiglu(unittest.TestCase):
         from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
             fused_experts_impl,
         )
-
         from sglang.srt.server_args import (
             ServerArgs,
             set_global_server_args_for_scheduler,
