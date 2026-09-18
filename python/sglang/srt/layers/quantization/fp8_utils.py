@@ -1603,22 +1603,24 @@ def transform_scale_ue8m0_inplace(param, mn):
 
 # NOTE copy and modified from DeepGEMM
 def transform_scale_ue8m0(sf, mn, use_torch_impl: bool = False):
+    # Packing is a device-independent bit/layout transform. In particular, HIP
+    # tensors also report is_cuda, but must not import NVIDIA's DeepGEMM.
+    use_torch_impl = use_torch_impl or not (
+        (_is_cuda and sf.is_cuda) or (_is_musa and sf.device.type == "musa")
+    )
+    sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
+    if use_torch_impl:
+        return _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl(sf)
+
     import deep_gemm.utils.layout
 
-    get_mn_major_tma_aligned_packed_ue8m0_tensor = (
-        _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl
-        if use_torch_impl
-        else deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor
-    )
-
-    sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
-    sf = get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
+    sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
 
     # In sgl-deep-gemm, the C++ deepgemm path returns through DLPack which collapses the stride
     # of size-1 trailing dims to 1 (happens when packed_sf_k == 1, i.e.
     # K <= block_k * 4). Restore the TMA-aligned stride so the deepgemm
     # assertion sf.stride(-1) == get_tma_aligned_size(mn, element_size) holds.
-    if not use_torch_impl and sf.shape[-1] == 1:
+    if sf.shape[-1] == 1:
         from deep_gemm.utils import get_tma_aligned_size
 
         aligned_mn = get_tma_aligned_size(sf.shape[-2], sf.element_size())
@@ -1633,8 +1635,6 @@ def transform_scale_ue8m0(sf, mn, use_torch_impl: bool = False):
 def _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl(
     x: torch.Tensor,
 ) -> torch.Tensor:
-    from deep_gemm.utils import align, get_tma_aligned_size
-
     assert x.dtype == torch.float and x.dim() in (2, 3)
 
     # First, convert into UE8M0 `uint8_t`
@@ -1646,8 +1646,10 @@ def _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl(
     if x.dim() == 2:
         x, remove_dim = x.unsqueeze(0), True
     b = x.shape[0]
-    aligned_mn = get_tma_aligned_size(mn, 4)
-    aligned_k = align(k, 4)
+    # TMA requires 16-byte alignment: four int32 elements along MN.
+    # Four exponent bytes are packed into each int32 along K.
+    aligned_mn = ceil_align(mn, 4)
+    aligned_k = ceil_align(k, 4)
     padded = torch.zeros((b, aligned_mn, aligned_k), device=x.device, dtype=torch.uint8)
     padded[:, :mn, :k] = ue8m0_tensor
     padded = padded.view(-1).view(dtype=torch.int).view(b, aligned_mn, aligned_k // 4)
@@ -1675,8 +1677,8 @@ def inverse_transform_scale_ue8m0(sf_packed, mn):
 def _inverse_transform_scale_ue8m0_impl(sf_packed):
     """
     NOTE: We assume k is aligned
-    :param sf_packed: (scale_mn, scale_k/4) int32
-    :return: (scale_mn, scale_k), float32
+    :param sf_packed: (mn, aligned_scale_k/4) int32, with 128-row repeats
+    :return: (ceil(mn/128), aligned_scale_k), float32
     """
     if len(sf_packed.shape) == 3:
         return torch.stack(
@@ -1688,23 +1690,27 @@ def _inverse_transform_scale_ue8m0_impl(sf_packed):
     assert sf_packed.dtype == torch.int32
 
     mn_repeat_128, k_div_4 = sf_packed.shape
-    mn = mn_repeat_128 // block_size
+    mn = ceil_div(mn_repeat_128, block_size)
     k = k_div_4 * 4
 
     # packed u8 -> fp32
-    sf_u8 = sf_packed.contiguous().flatten().view(torch.uint8).view(mn_repeat_128, k)
+    sf_flat = sf_packed.contiguous().flatten()
+    # A one-element TMA view can be contiguous yet retain a non-unit stride.
+    # Reinterpreting its dtype requires stride 1, which is safe for this scalar.
+    if sf_flat.numel() == 1:
+        sf_flat = sf_flat.as_strided((1,), (1,))
+    sf_u8 = sf_flat.view(torch.uint8).view(mn_repeat_128, k)
     sf_fp32 = (sf_u8.to(torch.int32) << 23).view(torch.float32)
 
-    # remove repeat
-    sf_reshaped = sf_fp32.view(mn, block_size, k)
-    sf_unrepeated = sf_reshaped[:, 0:1, :]
-    if not torch.all(sf_unrepeated == sf_reshaped):
+    # Remove the 128-row repeats, including a possibly partial last block.
+    sf_unrepeated = sf_fp32[::block_size].contiguous()
+    sf_repeated = sf_unrepeated.repeat_interleave(block_size, dim=0)[:mn_repeat_128]
+    if not torch.all(sf_repeated == sf_fp32):
         from sglang.srt.debug_utils.dumper import get_tensor_info
 
         raise AssertionError(
-            f"sf_unrepeated != sf_reshaped ({get_tensor_info(sf_unrepeated)=} {get_tensor_info(sf_reshaped)=})"
+            f"sf_repeated != sf_fp32 ({get_tensor_info(sf_repeated)=} {get_tensor_info(sf_fp32)=})"
         )
-    sf_unrepeated = sf_unrepeated.squeeze(1).contiguous()
 
     assert sf_unrepeated.shape == (mn, k)
     return sf_unrepeated

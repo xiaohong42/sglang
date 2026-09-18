@@ -178,6 +178,27 @@ class TestCompareQuantPair(CustomTestCase):
         self.assertTrue(equal)
 
 
+class TestCompareQuantPairCpu(CustomTestCase):
+    def test_ue8m0_packed_scale_equals_unpacked_scale(self):
+        qweight, sf_fp32, sf_packed_int32 = _build_fp8_quant_pair(device="cpu")
+
+        def cpu_transport(tensor, *args, **kwargs):
+            # Only replace transport, preserving normalization, dequantization,
+            # tolerance calculation and the actual comparison implementation.
+            self.assertEqual(tensor.device.type, "cpu")
+            return tensor
+
+        with patch.object(torch.Tensor, "cuda", cpu_transport):
+            result = _compare_quant_pair(qweight, sf_packed_int32, qweight, sf_fp32)
+            self.assertEqual(result, (True, 0.0, 0.0, 0))
+            # A changed scale must still be detected, not hidden by fallback.
+            changed = _compare_quant_pair(
+                qweight, sf_packed_int32, qweight, sf_fp32 * 2
+            )
+        self.assertFalse(changed.equal)
+        self.assertGreater(changed.num_exceed, 0)
+
+
 # ---------------------------------------------------------------------------
 # Raw comparison regressions (CPU-only: isolate chunk transport from comparison)
 # ---------------------------------------------------------------------------

@@ -81,11 +81,12 @@ def _assert_entries_close(
             )
 
 
-def _build_fp8_quant_pair(device: str = "cuda"):
+def _build_fp8_quant_pair(device: str = "cpu"):
     """Construct a real fp8-quantized weight + matching fp32 + ue8m0-packed scales.
 
     Returns (qweight, sf_fp32, sf_packed_int32) so callers can pick which scale dtype
-    drives the _build_check_entries branch under test.
+    drives the _build_check_entries branch under test. Entry construction itself
+    is device-independent, so keep its fixtures on CPU.
     """
     weight_bf16 = torch.randn((256, 128), dtype=torch.bfloat16, device=device)
     block_size = [128, 128]
@@ -289,7 +290,7 @@ class TestPostprocessTensors(CustomTestCase):
 
     def test_fp8_quant_pair_yield_order_alongside_other_entries(self):
         qweight, sf_fp32, _ = _build_fp8_quant_pair()
-        bias = torch.ones(4, device="cuda")
+        bias = torch.ones(4, device=qweight.device)
         raw = {
             "x.weight": qweight,
             "x.weight_scale_inv": sf_fp32,

@@ -621,11 +621,13 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         self.assertTrue(self._leaf("enable_tf32_matmul"))
         self.assertFalse(self._leaf("enable_multi_layer_eagle"))  # the pristine value
 
-    def test_minimax_m2_sm10x_nvfp4_uses_routed_trtllm(self):
+    @override_platform(is_hip=False)
+    @patch("sglang.srt.configs.model_config.is_hip", return_value=False)
+    def test_minimax_m2_sm10x_nvfp4_uses_routed_trtllm(self, _mock_is_hip):
         """MiniMax-M2 NVFP4 auto must avoid the unsupported plain TRT-LLM path."""
-        # Every module that asks: the attention handler validates what the
-        # override family picks, and each holds its own import.
-        with override_platform(is_sm100=True), override_platform(is_sm100=True):
+        # ModelConfig still uses the direct HIP probe; match it to the scoped
+        # NVIDIA platform without bypassing quantization validation itself.
+        with override_platform(is_sm100=True):
             explicit = self._construct(
                 "MiniMaxM2ForCausalLM",
                 "llama",
@@ -1282,6 +1284,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         )
         self.assertEqual(_deterministic_sampling_backend(view), {})
 
+    @override_platform(is_hip=False, is_npu=False)
     def test_dllm_forces_flashinfer_with_cuda_graph(self):
         # CUDA path: cuda graph enabled by default -> dllm forces flashinfer.
         # A real dllm arch: the page pass now runs regardless of the radix
@@ -1570,6 +1573,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 _sparse_head_overlap_disable(view), {"disable_overlap_schedule": True}
             )
 
+    @override_platform(is_hip=False)
     def test_deepseek_v4_overrides_at_callable_level(self):
         from sglang.srt.arg_groups.model_overrides.deepseek_v4 import (
             _deepseek_v4_overrides,
@@ -2135,15 +2139,34 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             _deepseek_v4_kv_cache_dtype(_view(device="npu")),
             {"kv_cache_dtype": "bfloat16"},
         )
-        # explicit supported value survives
+        # Explicit supported values survive; the global bf16 alias normalizes
+        # to the same existing bfloat16 choice (not a new pool dtype).
+        for device in ("cuda", "cpu", "npu"):
+            with self.subTest(device=device):
+                self.assertEqual(
+                    _deepseek_v4_kv_cache_dtype(
+                        _view(device=device, kv_cache_dtype="bfloat16")
+                    ),
+                    {},
+                )
+                self.assertEqual(
+                    _deepseek_v4_kv_cache_dtype(
+                        _view(device=device, kv_cache_dtype="bf16")
+                    ),
+                    {"kv_cache_dtype": "bfloat16"},
+                )
         self.assertEqual(
-            _deepseek_v4_kv_cache_dtype(_view(kv_cache_dtype="bfloat16")), {}
+            _deepseek_v4_kv_cache_dtype(_view(kv_cache_dtype="fp8_e4m3")), {}
         )
         with self.assertRaises(AssertionError):
             _deepseek_v4_kv_cache_dtype(_view(kv_cache_dtype="fp8_e5m2"))
-        self.assertEqual(
-            _deepseek_v4_kv_cache_dtype(_view(arch="LlamaForCausalLM")), {}
-        )
+        for dtype in ("auto", "bf16"):
+            self.assertEqual(
+                _deepseek_v4_kv_cache_dtype(
+                    _view(arch="LlamaForCausalLM", kv_cache_dtype=dtype)
+                ),
+                {},
+            )
 
     def test_deepseek_spec_moe_resolution_pass(self):
         from sglang.srt.arg_groups.overrides import (
@@ -2800,18 +2823,30 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             _data_parallelism_defaults,
         )
 
+        def _view(**kw):
+            defaults = dict(
+                dp_size=1,
+                ep_join_mode=None,
+                enable_dp_lm_head=False,
+                attn_cp_size=1,
+            )
+            defaults.update(kw)
+            return ResolvedView(SimpleNamespace(**defaults))
+
+        disabled = {"enable_dp_attention": False, "enable_dp_lm_head": False}
+        self.assertEqual(_data_parallelism_defaults(_view()), disabled)
         self.assertEqual(
-            _data_parallelism_defaults(
-                ResolvedView(SimpleNamespace(dp_size=1, ep_join_mode=None))
-            ),
-            {"enable_dp_attention": False, "enable_dp_lm_head": False},
+            _data_parallelism_defaults(_view(enable_dp_lm_head=True)), disabled
         )
+        # Context-parallel LM head is intentional even without DP. Preserve
+        # that branch instead of changing production defaults to fit a stub.
         self.assertEqual(
-            _data_parallelism_defaults(
-                ResolvedView(SimpleNamespace(dp_size=2, ep_join_mode=None))
-            ),
-            {},
+            _data_parallelism_defaults(_view(enable_dp_lm_head=True, attn_cp_size=2)),
+            {"enable_dp_attention": False},
         )
+        self.assertEqual(_data_parallelism_defaults(_view(attn_cp_size=2)), disabled)
+        self.assertEqual(_data_parallelism_defaults(_view(dp_size=2)), {})
+        self.assertEqual(_data_parallelism_defaults(_view(ep_join_mode="scale")), {})
 
         self.assertEqual(
             _a2a_ep_size(
