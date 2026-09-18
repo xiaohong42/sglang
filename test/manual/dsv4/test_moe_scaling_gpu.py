@@ -112,7 +112,17 @@ def test_dsv4_moe_scale_gpu(
                 StandardDispatchOutput(hidden, None, topk), self.quant_info
             ).hidden_states
 
-    with get_parallel().override(moe_ep_size=1, moe_tp_size=1, moe_ep_rank=0, moe_tp_rank=0, tp_rank=0, attn_tp_size=1, attn_tp_rank=0, attn_dp_size=1, attn_dp_rank=0), patch.object(flags, "a2a_backend", MoeA2ABackend.NONE), patch.object(
+    with get_parallel().override(
+        moe_ep_size=1,
+        moe_tp_size=1,
+        moe_ep_rank=0,
+        moe_tp_rank=0,
+        tp_rank=0,
+        attn_tp_size=1,
+        attn_tp_rank=0,
+        attn_dp_size=1,
+        attn_dp_rank=0,
+    ), patch.object(flags, "a2a_backend", MoeA2ABackend.NONE), patch.object(
         flags, "runner_backend", MoeRunnerBackend.TRITON
     ), patch.object(
         model, "get_moe_impl_class", return_value=SmallExperts

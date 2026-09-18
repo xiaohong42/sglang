@@ -163,7 +163,9 @@ class _RawModelProof:
         canonical = dict(model.named_parameters())
         canonical.update(model.named_buffers())
         assert checker._snapshot_tensors is not None, "missing WeightChecker snapshot"
-        assert set(canonical) == set(checker._snapshot_tensors), "snapshot scope mismatch"
+        assert set(canonical) == set(
+            checker._snapshot_tensors
+        ), "snapshot scope mismatch"
         canonical_names = {id(tensor): name for name, tensor in canonical.items()}
         self.names = {name: canonical_names[id(t)] for name, (_, t) in tensors.items()}
         self.meta = {name: _tensor_meta(kind, t) for name, (kind, t) in tensors.items()}
@@ -195,13 +197,15 @@ class _RawModelProof:
         differences, checked = {}, set()
         for name, (kind, tensor) in tensors.items():
             before, after = self.meta[name], _tensor_meta(kind, tensor)
-            assert before["spec"] == after["spec"], f"shape/dtype/layout/pointer: {name}"
+            assert (
+                before["spec"] == after["spec"]
+            ), f"shape/dtype/layout/pointer: {name}"
             assert before["attrs"] == after["attrs"], f"FP8 layout attributes: {name}"
             if kind == "parameter":
                 assert before["parameter"]() is tensor, f"Parameter identity: {name}"
-                assert before["loader"] is after["loader"], (
-                    f"weight_loader identity: {name}"
-                )
+                assert (
+                    before["loader"] is after["loader"]
+                ), f"weight_loader identity: {name}"
             canonical_name = self.names[name]
             if canonical_name in checked:
                 continue
@@ -214,17 +218,21 @@ class _RawModelProof:
                 _assert_finite(act, name)
                 import numpy as np
 
-                changed_bytes += int(np.count_nonzero(
-                    exp.view(torch.uint8).numpy() != act.view(torch.uint8).numpy()
-                ))
+                changed_bytes += int(
+                    np.count_nonzero(
+                        exp.view(torch.uint8).numpy() != act.view(torch.uint8).numpy()
+                    )
+                )
                 if expect_changed and name == _CHANGED_PARAMETER:
-                    assert not torch.count_nonzero(act).item(), "norm update was not zero"
+                    assert not torch.count_nonzero(
+                        act
+                    ).item(), "norm update was not zero"
             if changed_bytes:
                 differences[name] = changed_bytes
         if expect_changed:
-            assert set(differences) == {_CHANGED_PARAMETER}, (
-                f"expected ONLY zeroed {_CHANGED_PARAMETER}; raw differences={differences}"
-            )
+            assert set(differences) == {
+                _CHANGED_PARAMETER
+            }, f"expected ONLY zeroed {_CHANGED_PARAMETER}; raw differences={differences}"
         else:
             assert not differences, f"raw byte differences: {differences}"
         return {
@@ -250,9 +258,9 @@ def _install_raw_checks(checker_class, run_checked):
         previous_proof = getattr(checker, "_manual_raw_proof", None)
 
         def check():
-            assert getattr(checker, "_manual_raw_proof", None) is None, (
-                "refusing to overwrite an unconsumed baseline"
-            )
+            assert (
+                getattr(checker, "_manual_raw_proof", None) is None
+            ), "refusing to overwrite an unconsumed baseline"
             original_snapshot(checker)
             checker._manual_raw_proof = _RawModelProof(checker)
             report(checker, "raw-snapshot", checker._manual_raw_proof.scope)
@@ -287,9 +295,9 @@ def _install_raw_checks(checker_class, run_checked):
         if action == _CHANGED_ACTION:
 
             def check():
-                assert not allow_quant_error and not skip_tensor_list, (
-                    "strict manual gate"
-                )
+                assert (
+                    not allow_quant_error and not skip_tensor_list
+                ), "strict manual gate"
                 proof = checker._manual_raw_proof
                 assert proof is not None, "missing controlled-change baseline"
                 details = proof.compare(checker, expect_changed=True)
@@ -363,7 +371,9 @@ def _logprobs(output, *, prompt_only=False):
     values = list(meta["input_token_logprobs"])
     if not prompt_only:
         values += list(meta["output_token_logprobs"])
-    positions = [(i, value[1]) for i, value in enumerate(values) if value[0] is not None]
+    positions = [
+        (i, value[1]) for i, value in enumerate(values) if value[0] is not None
+    ]
     scores = np.asarray([value[0] for value in values if value[0] is not None])
     assert scores.size > 0 and np.isfinite(scores).all(), "empty/nonfinite logprobs"
     return positions, scores
@@ -394,7 +404,9 @@ def _assert_changed(reference, actual):
     assert expected_positions == observed_positions, "changed prompt logprob alignment"
     assert expected.shape == observed.shape, "changed prompt logprob count"
     max_diff = float(np.max(np.abs(observed - expected)))
-    assert max_diff > 1e-4, f"controlled norm update did not affect logprobs: {max_diff}"
+    assert (
+        max_diff > 1e-4
+    ), f"controlled norm update did not affect logprobs: {max_diff}"
     print(
         json.dumps({"stage": "controlled-change", "max_prompt_logprob_diff": max_diff}),
         flush=True,

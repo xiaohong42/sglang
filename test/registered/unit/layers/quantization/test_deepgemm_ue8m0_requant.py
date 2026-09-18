@@ -41,9 +41,10 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
     def test_helper_requants_supported_deepgemm_bf16_once(self):
         weight, weight_scale = _make_params()
 
-        with self._enabled_deepgemm_ue8m0(), patch.object(
-            fp8_utils, "requant_weight_ue8m0_inplace"
-        ) as requant:
+        with (
+            self._enabled_deepgemm_ue8m0(),
+            patch.object(fp8_utils, "requant_weight_ue8m0_inplace") as requant,
+        ):
             fired = fp8_utils.requant_block_scale_ue8m0_for_deepgemm(
                 weight,
                 weight_scale,
@@ -69,9 +70,10 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
     def test_helper_skips_non_bf16_output(self):
         weight, weight_scale = _make_params()
 
-        with self._enabled_deepgemm_ue8m0(), patch.object(
-            fp8_utils, "requant_weight_ue8m0_inplace"
-        ) as requant:
+        with (
+            self._enabled_deepgemm_ue8m0(),
+            patch.object(fp8_utils, "requant_weight_ue8m0_inplace") as requant,
+        ):
             fired = fp8_utils.requant_block_scale_ue8m0_for_deepgemm(
                 weight,
                 weight_scale,
@@ -88,9 +90,10 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
     def test_helper_skips_shape_deepgemm_will_not_run(self):
         weight, weight_scale = _make_params(n=96, k=128)
 
-        with self._enabled_deepgemm_ue8m0(), patch.object(
-            fp8_utils, "requant_weight_ue8m0_inplace"
-        ) as requant:
+        with (
+            self._enabled_deepgemm_ue8m0(),
+            patch.object(fp8_utils, "requant_weight_ue8m0_inplace") as requant,
+        ):
             fired = fp8_utils.requant_block_scale_ue8m0_for_deepgemm(
                 weight,
                 weight_scale,
@@ -107,9 +110,10 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
     def test_helper_skips_non_deepgemm_runner(self):
         weight, weight_scale = _make_params()
 
-        with self._enabled_deepgemm_ue8m0(), patch.object(
-            fp8_utils, "requant_weight_ue8m0_inplace"
-        ) as requant:
+        with (
+            self._enabled_deepgemm_ue8m0(),
+            patch.object(fp8_utils, "requant_weight_ue8m0_inplace") as requant,
+        ):
             fired = fp8_utils.requant_block_scale_ue8m0_for_deepgemm(
                 weight,
                 weight_scale,
@@ -127,9 +131,10 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
         weight, weight_scale = _make_params()
         unsupported_block_size = [128, 256]
 
-        with self._enabled_deepgemm_ue8m0(), patch.object(
-            fp8_utils, "requant_weight_ue8m0_inplace"
-        ) as requant:
+        with (
+            self._enabled_deepgemm_ue8m0(),
+            patch.object(fp8_utils, "requant_weight_ue8m0_inplace") as requant,
+        ):
             fired = fp8_utils.requant_block_scale_ue8m0_for_deepgemm(
                 weight,
                 weight_scale,
@@ -191,18 +196,22 @@ class TestDeepGemmUE8M0Requant(CustomTestCase):
             weight_scale.format_ue8m0 = True
             return True
 
-        with patch.multiple(
-            fp8_quant,
-            _is_cpu=False,
-            _is_fp8_fnuz=False,
-            _use_aiter=False,
-        ), patch.object(
-            method, "is_deepgemm_moe_runner_backend_enabled", return_value=True
-        ), patch.object(
-            fp8_quant,
-            "requant_block_scale_ue8m0_for_deepgemm",
-            side_effect=_mark_ue8m0,
-        ) as requant:
+        with (
+            patch.multiple(
+                fp8_quant,
+                _is_cpu=False,
+                _is_fp8_fnuz=False,
+                _use_aiter=False,
+            ),
+            patch.object(
+                method, "is_deepgemm_moe_runner_backend_enabled", return_value=True
+            ),
+            patch.object(
+                fp8_quant,
+                "requant_block_scale_ue8m0_for_deepgemm",
+                side_effect=_mark_ue8m0,
+            ) as requant,
+        ):
             method.process_weights_after_loading_block_quant(layer)
 
         self.assertEqual(
@@ -308,9 +317,7 @@ class TestUE8M0PackingCpu(CustomTestCase):
                                 packed.untyped_storage()
                             )
                             self.assertEqual(raw.tolist(), list(expected_bytes))
-                            torch.testing.assert_close(
-                                scales, original, rtol=0, atol=0
-                            )
+                            torch.testing.assert_close(scales, original, rtol=0, atol=0)
 
     def test_cpu_and_rocm_dispatch_do_not_import_deepgemm(self):
         scales = torch.ones((1, 1))
@@ -373,9 +380,7 @@ class TestUE8M0PackingCpu(CustomTestCase):
                             actual = Fp8BlockComparable(q, scale).dequantize(
                                 torch.float32
                             )
-                            torch.testing.assert_close(
-                                actual, expected, rtol=0, atol=0
-                            )
+                            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_inverse_still_rejects_corrupted_repeated_rows(self):
         for mn in (128, 130):

@@ -36,7 +36,9 @@ def model():
     result.weight_scale_inv = _parameter(torch.ones(4, 4))
     result.weight_scale_inv.format_ue8m0 = False
     result.register_buffer("freqs_cis", torch.tensor([1 + 2j]), persistent=False)
-    result.register_buffer("view", torch.arange(60, dtype=torch.float64).view(5, 12).t())
+    result.register_buffer(
+        "view", torch.arange(60, dtype=torch.float64).view(5, 12).t()
+    )
     result.register_buffer("integer", torch.tensor([2**60], dtype=torch.int64))
     result.register_buffer("flag", torch.tensor([True, False]))
     result.register_buffer("zero", torch.tensor([0.0]))
@@ -60,7 +62,8 @@ def checker(model):
             state = dict(model.named_parameters())
             state.update(model.named_buffers())
             self._snapshot_tensors = {
-                name: tensor.detach().contiguous().clone() for name, tensor in state.items()
+                name: tensor.detach().contiguous().clone()
+                for name, tensor in state.items()
             }
             self._snapshot_arena = object()
 
@@ -184,7 +187,10 @@ def test_identical_or_new_nonfinite_values_fail(model, checker, bad, before_snap
         (lambda m: setattr(m.weight, "data", m.weight.data.t()), "layout"),
         (lambda m: setattr(m.weight, "data", m.weight.data.reshape(2, 8)), "shape"),
         (lambda m: setattr(m.weight, "data", m.weight.data.view(torch.uint8)), "dtype"),
-        (lambda m: setattr(m.weight, "weight_loader", lambda *args: None), "weight_loader"),
+        (
+            lambda m: setattr(m.weight, "weight_loader", lambda *args: None),
+            "weight_loader",
+        ),
         (lambda m: setattr(m.weight, "is_shuffled", True), "FP8 layout attributes"),
         (
             lambda m: setattr(m.weight, "_fp8_block_aiter_shuffled", True),
@@ -231,7 +237,9 @@ def test_meta_tensor_fails_closed():
 
 @pytest.mark.parametrize("shape", [(3, 7, 11), (1, 43), (), (0, 5)])
 def test_noncontiguous_chunk_size_and_full_coverage(shape):
-    original = torch.arange(torch.Size(shape).numel(), dtype=torch.float64).reshape(shape)
+    original = torch.arange(torch.Size(shape).numel(), dtype=torch.float64).reshape(
+        shape
+    )
     actual = original.transpose(0, -1) if len(shape) > 1 else original
     expected = actual.contiguous()
     total = 0
@@ -309,7 +317,9 @@ def test_logprob_change_uses_same_prompt_not_changed_tokens():
     manual._assert_same(reference, _output(), "same")
 
 
-@pytest.mark.parametrize("failure", [None, "no_logprob_effect", "raw_check", "transport"])
+@pytest.mark.parametrize(
+    "failure", [None, "no_logprob_effect", "raw_check", "transport"]
+)
 def test_controlled_flow_restores_even_after_failures(model, checker, failure):
     original = model.model.norm.weight.detach().clone()
     baseline = _output()
@@ -336,7 +346,9 @@ def test_controlled_flow_restores_even_after_failures(model, checker, failure):
         def generate(self, **kwargs):
             changed = not bool(model.model.norm.weight.count_nonzero())
             return _output(
-                prompt_score=-3.0 if changed and failure != "no_logprob_effect" else -1.0
+                prompt_score=(
+                    -3.0 if changed and failure != "no_logprob_effect" else -1.0
+                )
             )
 
     def check(action):
@@ -346,7 +358,9 @@ def test_controlled_flow_restores_even_after_failures(model, checker, failure):
             raise AssertionError("simulated raw check failure")
 
     def run():
-        manual._controlled_change(Engine(), check, original, "norm.weight", baseline, [1, 2])
+        manual._controlled_change(
+            Engine(), check, original, "norm.weight", baseline, [1, 2]
+        )
 
     if failure is None:
         run()
