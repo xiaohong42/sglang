@@ -295,7 +295,12 @@ def _install_raw_checks(checker_class, run_checked):
 
 def _run_scheduler_with_raw_checks(*args, **kwargs):
     """Top-level, spawn-picklable target: parent-only monkeypatches are insufficient."""
+    import torch
     import torch.distributed as dist
+
+    # CPU byte/finite checks are small chunks: a large OpenMP pool per TP rank
+    # makes their thousands of reductions far slower and oversubscribes the host.
+    torch.set_num_threads(1)
 
     from sglang.srt.distributed import get_tp_group
     from sglang.srt.managers.scheduler import run_scheduler_process
@@ -416,8 +421,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--port", type=int, default=31917)
-    parser.add_argument("--context-length", type=int, default=1024)
-    parser.add_argument("--max-total-tokens", type=int, default=4096)
+    parser.add_argument("--context-length", type=int, default=4096)
+    parser.add_argument("--max-total-tokens", type=int, default=32768)
     args = parser.parse_args()
     if args.context_length <= 0 or args.max_total_tokens < args.context_length:
         parser.error("require 0 < context-length <= max-total-tokens")
