@@ -211,6 +211,7 @@ from sglang.srt.utils import (
     BumpAllocator,
     LazyValue,
     add_prefix,
+    is_gfx942_supported,
     is_non_idle_and_non_empty,
     make_layers,
     use_intel_amx_backend,
@@ -549,6 +550,11 @@ class MoEGate(nn.Module):
                     hidden_states, self.weight, out_dtype=torch.float32
                 )
 
+            elif self.is_deepseek_v4 and _is_hip and is_gfx942_supported():
+                # Keep DSV4 routing in FP32 on gfx942 even when AITER is disabled.
+                # The AITER wrapper already uses this path to avoid BF16 split-K
+                # accumulation; the global kernel toggle must not reduce precision.
+                logits = F.linear(hidden_states.float(), self.weight.detach().float())
             elif _use_aiter:
                 logits = aiter_dsv3_router_gemm(hidden_states, self.weight)
             elif not _is_cuda:
@@ -614,7 +620,14 @@ class DeepseekV2MoE(nn.Module):
         self.alt_stream = alt_stream
         self.is_nextn = is_nextn
 
-        n_hash_layers = getattr(config, "num_hash_layers", 0)
+        # HF checkpoints use num_hash_layers; the local DSV4 config uses
+        # n_hash_layers. Keep the canonical field authoritative, including 0.
+        # Limit the alias fallback to HIP so other platforms remain unchanged.
+        n_hash_layers = getattr(
+            config,
+            "num_hash_layers",
+            getattr(config, "n_hash_layers", 0) if is_deepseek_v4 and _is_hip else 0,
+        )
         self.is_hash = layer_id < n_hash_layers and not (is_deepseek_v4 and is_nextn)
 
         if self.tp_size > config.n_routed_experts:
@@ -670,6 +683,25 @@ class DeepseekV2MoE(nn.Module):
             prefix=add_prefix("experts", prefix),
         )
 
+        # Only this concrete gfx942 runner/dispatcher path is known to finalize
+        # the scale here: Triton combine scales when AITER is off; with AITER
+        # it only sums, so both learned and hash TopK must scale their weights.
+        # Do not infer ownership from the global runner setting (quant methods
+        # may select a different runner), or alter fused shared/A2A semantics.
+        runner = getattr(self.experts, "runner", None)
+        self._hip_triton_routed_scale_finalized = (
+            is_deepseek_v4
+            and _is_hip
+            and is_gfx942_supported()
+            and get_moe_a2a_backend().is_none()
+            and runner is not None
+            and runner.runner_backend.is_triton()
+            and not runner.config.no_combine
+            and not self.experts.should_fuse_routed_scaling_factor_in_topk
+            and not isinstance(self.experts.quant_method, KTEPWrapperMethod)
+            and self.num_fused_shared_experts == 0
+        )
+
         if self.is_hash and not (is_nextn and is_deepseek_v4):
             self.topk = HashTopK(
                 topk=config.num_experts_per_tok + self.num_fused_shared_experts,
@@ -678,7 +710,11 @@ class DeepseekV2MoE(nn.Module):
                 vocab_size=config.vocab_size,
                 scoring_func=config.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
-                apply_routed_scaling_factor_on_output=self.experts.should_fuse_routed_scaling_factor_in_topk,
+                apply_routed_scaling_factor_on_output=(
+                    _use_aiter
+                    if self._hip_triton_routed_scale_finalized
+                    else self.experts.should_fuse_routed_scaling_factor_in_topk
+                ),
                 layer_id=self.layer_id,
             )
         else:
@@ -713,9 +749,13 @@ class DeepseekV2MoE(nn.Module):
                     scoring_func=config.scoring_func,
                     is_fp4_experts=getattr(quant_config, "is_fp4_experts", False),
                     apply_routed_scaling_factor_on_output=(
-                        True
-                        if _use_aiter
-                        else self.experts.should_fuse_routed_scaling_factor_in_topk
+                        _use_aiter
+                        if self._hip_triton_routed_scale_finalized
+                        else (
+                            True
+                            if _use_aiter
+                            else self.experts.should_fuse_routed_scaling_factor_in_topk
+                        )
                     ),
                 )
             self.topk = TopK(**topk_kwargs)
@@ -1022,6 +1062,7 @@ class DeepseekV2MoE(nn.Module):
             not _is_cuda
             and not _is_musa
             and not _use_aiter
+            and not self._hip_triton_routed_scale_finalized
             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
         ):
             final_hidden_states *= self.routed_scaling_factor
@@ -1169,9 +1210,10 @@ class DeepseekV2MoE(nn.Module):
             and not _is_musa
             and not _is_xpu
             and not _use_aiter
+            and not self._hip_triton_routed_scale_finalized
             or isinstance(self.experts.quant_method, KTEPWrapperMethod)
         ):
-            # fused in biased_grouped_topk so we can skip here
+            # Other backends still finalize the routed scale outside the runner.
             final_hidden_states *= self.routed_scaling_factor
 
         if (
