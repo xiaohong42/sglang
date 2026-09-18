@@ -123,9 +123,13 @@ class RawComparable(ComparableWeight):
 def compare_weights(
     expect: ComparableWeight, actual: ComparableWeight
 ) -> CompareResult:
-    """Chunked element-wise compare in ComparableWeight space."""
+    """Chunked comparison: raw bytes/finite values or dequantized quantization space."""
+    raw_pair = isinstance(expect, RawComparable) and isinstance(actual, RawComparable)
+    if raw_pair:
+        assert expect.tensor.shape == actual.tensor.shape, "raw tensor shape mismatch"
+        assert expect.tensor.dtype == actual.tensor.dtype, "raw tensor dtype mismatch"
     equal = True
-    max_abs_err = torch.zeros((), dtype=torch.float32)
+    max_abs_err = torch.zeros((), dtype=torch.float64 if raw_pair else torch.float32)
     sum_abs_err = 0.0
     num_exceed = 0
     numel = 0
@@ -136,18 +140,52 @@ def compare_weights(
             expect_dq.shape == actual_dq.shape
         ), f"{expect_dq.shape=} {actual_dq.shape=}"
         numel += expect_dq.numel()
-        abs_diff = (actual_dq.float() - expect_dq.float()).abs()
-        if torch.all(abs_diff == 0):
-            continue
+        if raw_pair:
+            # Never cast before deciding raw equality: float32 loses imaginary
+            # components, float64 precision and large integer differences.
+            # Numeric error below is diagnostic only; bytes decide acceptance.
+            expected_bytes = (
+                expect_dq.resolve_conj().resolve_neg().contiguous().view(torch.uint8)
+            ).reshape(-1, expect_dq.element_size())
+            actual_bytes = (
+                actual_dq.resolve_conj().resolve_neg().contiguous().view(torch.uint8)
+            ).reshape(-1, actual_dq.element_size())
+            mismatched = (expected_bytes != actual_bytes).any(dim=1)
+            finite = torch.ones_like(mismatched)
+            if expect_dq.is_floating_point() or expect_dq.is_complex():
+                # FP8 finite kernels are not available on every backend. Cast
+                # narrow floats only for this check, never for byte equality.
+                finite_dtype = (
+                    torch.float32
+                    if expect_dq.is_floating_point() and expect_dq.element_size() < 4
+                    else expect_dq.dtype
+                )
+                finite = (
+                    torch.isfinite(expect_dq.to(finite_dtype))
+                    & torch.isfinite(actual_dq.to(finite_dtype))
+                ).reshape(-1)
+            # Matching NaN/Inf bytes must not make an invalid weight pass.
+            exceeded = mismatched | ~finite
+            if not torch.any(exceeded):
+                continue
+            dtype = torch.complex128 if expect_dq.is_complex() else torch.float64
+            abs_diff = (actual_dq.to(dtype) - expect_dq.to(dtype)).abs()
+        else:
+            abs_diff = (actual_dq.float() - expect_dq.float()).abs()
+            if torch.all(abs_diff == 0):
+                continue
+            # Each side contributes its own quantization ULP tolerance.
+            tol = (
+                0.0
+                if expect_tol is None or actual_tol is None
+                else expect_tol + actual_tol
+            )
+            # `~(diff <= tol)` instead of `diff > tol` so NaN counts as exceeding.
+            exceeded = ~(abs_diff <= tol)
         equal = False
-        # |actual_dq - expect_dq| ≤ |actual_dq - w| + |expect_dq - w| ≤ actual_tol + expect_tol
-        tol = (
-            0.0 if expect_tol is None or actual_tol is None else expect_tol + actual_tol
-        )
         max_abs_err = torch.maximum(max_abs_err, abs_diff.max().cpu())
         sum_abs_err += abs_diff.sum().item()
-        # `~(diff <= tol)` instead of `diff > tol` so NaN counts as exceeding.
-        num_exceed += int((~(abs_diff <= tol)).sum())
+        num_exceed += int(exceeded.sum())
     return CompareResult(
         equal, max_abs_err.item(), sum_abs_err / max(numel, 1), num_exceed
     )
