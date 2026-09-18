@@ -51,7 +51,9 @@ class FlattenedTensorBucket:
             flattened_tensors: List[torch.Tensor] = [None] * len(named_tensors)
 
             for i, (name, tensor) in enumerate(named_tensors):
-                flattened = tensor.flatten().view(torch.uint8)
+                # flatten() may preserve a strided view; byte reinterpretation
+                # requires a unit last stride when element sizes differ.
+                flattened = tensor.flatten().contiguous().view(torch.uint8)
                 flattened_tensors[i] = flattened
 
                 # Store metadata
