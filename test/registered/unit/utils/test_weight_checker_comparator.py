@@ -25,6 +25,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
 from sglang.srt.utils.weight_checker_comparator import (
     ComparableWeight,
     Fp8BlockComparable,
+    RawComparable,
     compare_weights,
     select_comparable_weight,
 )
@@ -175,6 +176,126 @@ class TestCompareQuantPair(CustomTestCase):
         s3 = self.e_s.reshape(2, 1, 2)
         equal, *_ = _compare_quant_pair(q3, s3, q3.clone(), s3.clone())
         self.assertTrue(equal)
+
+
+# ---------------------------------------------------------------------------
+# Raw comparison regressions (CPU-only: isolate chunk transport from comparison)
+# ---------------------------------------------------------------------------
+
+
+class TestCompareRawCpu(CustomTestCase):
+    def setUp(self):
+        def cpu_chunks(comparable):
+            from sglang.srt.utils import weight_checker_comparator as module
+
+            flat = comparable.tensor.reshape(-1)
+            for start in range(0, flat.numel(), module.CHUNK_NUMEL):
+                yield flat[start : start + module.CHUNK_NUMEL], None
+
+        self.cuda_patch = patch.object(RawComparable, "iter_chunks", cpu_chunks)
+        self.cuda_patch.start()
+        self.addCleanup(self.cuda_patch.stop)
+
+    def _compare(self, expected, actual):
+        return compare_weights(RawComparable(expected), RawComparable(actual))
+
+    def test_imaginary_only_change_is_not_equal(self):
+        expected = torch.tensor([1 + 2j, 3 + 4j])
+        actual = torch.tensor([1 + 5j, 3 + 4j])
+        result = self._compare(expected, actual)
+        self.assertFalse(result.equal)
+        self.assertEqual(result.num_exceed, 1)
+        self.assertEqual(result.max_abs_err, 3.0)
+        self.assertEqual(result.mean_abs_err, 1.5)
+
+    def test_double_precision_change_is_not_rounded_away(self):
+        for dtype in (torch.float64, torch.complex128):
+            with self.subTest(dtype=dtype):
+                expected = torch.tensor([1.0], dtype=dtype)
+                actual = expected + 2.0**-40
+                result = self._compare(expected, actual)
+                self.assertFalse(result.equal)
+                self.assertEqual(result.num_exceed, 1)
+                self.assertEqual(result.max_abs_err, 2.0**-40)
+
+    def test_large_integer_change_is_not_rounded_away(self):
+        for base in (2**24, 2**53):
+            with self.subTest(base=base):
+                result = self._compare(torch.tensor([base]), torch.tensor([base + 1]))
+                self.assertFalse(result.equal)
+                self.assertEqual(result.num_exceed, 1)
+
+    def test_signed_zero_is_not_bitwise_equal(self):
+        result = self._compare(torch.tensor([0.0]), torch.tensor([-0.0]))
+        self.assertFalse(result.equal)
+        self.assertEqual(result.num_exceed, 1)
+
+    def test_nonfinite_raw_values_fail_even_when_bytes_match(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=value):
+                tensor = torch.tensor([value])
+                result = self._compare(tensor, tensor.clone())
+                self.assertFalse(result.equal)
+                self.assertEqual(result.num_exceed, 1)
+
+    def test_identical_supported_dtypes_pass(self):
+        for dtype in (
+            torch.bool,
+            torch.int64,
+            torch.bfloat16,
+            torch.float8_e4m3fn,
+            torch.float32,
+            torch.float64,
+            torch.complex64,
+            torch.complex128,
+        ):
+            with self.subTest(dtype=dtype):
+                tensor = torch.tensor([0, 1, 2, 3]).to(dtype)
+                result = self._compare(tensor, tensor.clone())
+                self.assertEqual(tuple(result), (True, 0.0, 0.0, 0))
+
+    def test_shape_and_dtype_mismatch_are_rejected(self):
+        with self.assertRaises(AssertionError):
+            self._compare(torch.ones(2, 2), torch.ones(4))
+        with self.assertRaises(AssertionError):
+            self._compare(torch.ones(4), torch.ones(4, dtype=torch.float64))
+        with self.assertRaises(AssertionError):
+            self._compare(torch.empty(0, 2), torch.empty(0, 3))
+
+    def test_empty_and_noncontiguous_tensors(self):
+        empty = torch.empty(0)
+        self.assertEqual(tuple(self._compare(empty, empty)), (True, 0.0, 0.0, 0))
+        expected = torch.arange(12.0).reshape(3, 4)[:, ::2]
+        self.assertTrue(self._compare(expected, expected.clone()).equal)
+
+    def test_nonraw_quantization_tolerance_is_unchanged(self):
+        class CpuQuantized(ComparableWeight):
+            def __init__(self, values, tolerance):
+                self.values = torch.tensor(values)
+                self.tolerance = torch.full_like(self.values, tolerance)
+
+            def iter_chunks(self):
+                yield self.values, self.tolerance
+
+        expected = CpuQuantized([1.0, 2.0], 0.1)
+        within = compare_weights(expected, CpuQuantized([1.125, 2.0], 0.1))
+        self.assertFalse(within.equal)
+        self.assertEqual(within.num_exceed, 0)
+        outside = compare_weights(expected, CpuQuantized([1.5, 2.0], 0.1))
+        self.assertFalse(outside.equal)
+        self.assertEqual(outside.num_exceed, 1)
+        nonfinite = compare_weights(expected, CpuQuantized([float("nan"), 2.0], 0.1))
+        self.assertFalse(nonfinite.equal)
+        self.assertEqual(nonfinite.num_exceed, 1)
+
+    def test_chunking_preserves_raw_metrics(self):
+        expected = torch.zeros(10)
+        actual = torch.arange(10.0)
+        reference = self._compare(expected, actual)
+        with patch("sglang.srt.utils.weight_checker_comparator.CHUNK_NUMEL", 3):
+            chunked = self._compare(expected, actual)
+        self.assertEqual(chunked, reference)
+        self.assertEqual(tuple(chunked), (False, 9.0, 4.5, 9))
 
 
 # ---------------------------------------------------------------------------
