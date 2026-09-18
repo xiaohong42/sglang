@@ -139,11 +139,21 @@ def _cpu_chunk(tensor):
 def _assert_finite(tensor, name):
     import torch
 
-    if tensor.is_floating_point() or tensor.is_complex():
-        # CPU isfinite lacks some float8 kernels; only this diagnostic converts.
-        # Keep float64 precision and BOTH complex components for the actual check.
-        value = tensor.float() if str(tensor.dtype).startswith("torch.float8") else tensor
-        assert torch.isfinite(value).all().item(), f"nonfinite tensor: {name}"
+    if str(tensor.dtype).startswith("torch.float8"):
+        import numpy as np
+
+        raw = tensor.view(torch.uint8).numpy()
+        # E4M3 has no infinity. Inspect NaN bytes directly rather than widening
+        # hundreds of GB of CPU FP8 weights for each unchanged reload cycle.
+        if tensor.dtype == torch.float8_e4m3fnuz:
+            finite = not np.any(raw == 0x80)
+        elif tensor.dtype == torch.float8_e4m3fn:
+            finite = not np.any((raw & 0x7F) == 0x7F)
+        else:
+            finite = torch.isfinite(tensor.float()).all().item()
+        assert finite, f"nonfinite tensor: {name}"
+    elif tensor.is_floating_point() or tensor.is_complex():
+        assert torch.isfinite(tensor).all().item(), f"nonfinite tensor: {name}"
 
 
 class _RawModelProof:
@@ -202,9 +212,11 @@ class _RawModelProof:
                 exp, act = _cpu_chunk(exp), _cpu_chunk(act)
                 _assert_finite(exp, f"snapshot:{name}")
                 _assert_finite(act, name)
-                changed_bytes += torch.count_nonzero(
-                    exp.view(torch.uint8) != act.view(torch.uint8)
-                ).item()
+                import numpy as np
+
+                changed_bytes += int(np.count_nonzero(
+                    exp.view(torch.uint8).numpy() != act.view(torch.uint8).numpy()
+                ))
                 if expect_changed and name == _CHANGED_PARAMETER:
                     assert not torch.count_nonzero(act).item(), "norm update was not zero"
             if changed_bytes:
