@@ -914,6 +914,8 @@ def _deepseek_v4_kv_cache_dtype(view: Any) -> dict:
         return {}
 
     kv_cache_dtype = view.kv_cache_dtype
+    if kv_cache_dtype == "bf16":
+        kv_cache_dtype = "bfloat16"
     if kv_cache_dtype == "auto":
         kv_cache_dtype = "fp8_e4m3"
         logger.warning(f"Setting KV cache dtype to {kv_cache_dtype} for {model_arch}.")
