@@ -225,3 +225,11 @@ def test_begin_weight_update_rejects_reentry():
     with patch("torch.distributed.barrier"):
         with pytest.raises(AssertionError, match="already open"):
             manager.begin_weight_update(BeginWeightUpdateReqInput())
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__, "-v"]))
